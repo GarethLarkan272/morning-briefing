@@ -1,0 +1,26 @@
+name: Morning briefing
+
+on:
+  schedule:
+    # 04:30 UTC = 06:30 in South Africa. GitHub can start a few minutes late, so it lands before 07:00.
+    - cron: "30 4 * * *"
+  workflow_dispatch: {}  # "Run workflow" button for a test send
+
+permissions:
+  contents: read
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Write and send the briefing
+        run: python briefing.py
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
