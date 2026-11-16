@@ -29,9 +29,24 @@ FEEDS = {
         "The Defiant": "https://thedefiant.io/api/feed",
         "Cointelegraph": "https://cointelegraph.com/rss",
         "Blockworks": "https://blockworks.co/feed",
-        "Ethereum Foundation blog": "https://blog.ethereum.org/feed.xml",
         "Rekt": "https://rekt.news/rss/feed.xml",
         "Web3 Is Going Great": "https://www.web3isgoinggreat.com/feed.xml",
+    },
+    "ethereum": {
+        "Ethereum Foundation blog": "https://blog.ethereum.org/feed.xml",
+        "Ethereum Magicians": "https://ethereum-magicians.org/latest.rss",
+        # Client releases (GitHub). Lighthouse is Sigma Prime's own client.
+        "Lighthouse release": "https://github.com/sigp/lighthouse/releases.atom",
+        "Geth release": "https://github.com/ethereum/go-ethereum/releases.atom",
+        "Prysm release": "https://github.com/OffchainLabs/prysm/releases.atom",
+        "Teku release": "https://github.com/Consensys/teku/releases.atom",
+        "Nimbus release": "https://github.com/status-im/nimbus-eth2/releases.atom",
+        "Lodestar release": "https://github.com/ChainSafe/lodestar/releases.atom",
+        "Grandine release": "https://github.com/grandinetech/grandine/releases.atom",
+        "Nethermind release": "https://github.com/NethermindEth/nethermind/releases.atom",
+        "Besu release": "https://github.com/besu-eth/besu/releases.atom",
+        "Erigon release": "https://github.com/erigontech/erigon/releases.atom",
+        "Reth release": "https://github.com/paradigmxyz/reth/releases.atom",
     },
     "politics": {
         "BBC US & Canada": "https://feeds.bbci.co.uk/news/world/us_and_canada/rss.xml",
@@ -39,6 +54,9 @@ FEEDS = {
         "BBC World": "https://feeds.bbci.co.uk/news/world/rss.xml",
         "The Guardian World": "https://www.theguardian.com/world/rss",
         "Al Jazeera": "https://www.aljazeera.com/xml/rss/all.xml",
+        "News24 South Africa": "https://feeds.capi24.com/v1/Search/articles/news24/SouthAfrica/rss",
+        "News24 Politics": "https://feeds.capi24.com/v1/Search/articles/news24/Politics/rss",
+        "Daily Maverick": "https://www.dailymaverick.co.za/dmrss/",
     },
     "markets": {
         "CNBC Markets": "https://www.cnbc.com/id/20910258/device/rss/rss.html",
@@ -72,7 +90,10 @@ def when(el) -> datetime | None:
             try:
                 d = datetime.fromisoformat(v.strip().replace("Z", "+00:00"))
             except ValueError:
-                continue
+                try:  # News24: "Monday Nov 16 2026 13:12:07", South African time
+                    d = datetime.strptime(v.strip(), "%A %b %d %Y %H:%M:%S").replace(tzinfo=SAST)
+                except ValueError:
+                    continue
         return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
     return None
 
@@ -93,6 +114,8 @@ def fetch_news() -> tuple[dict, list]:
                 if not d or d < since:
                     continue
                 title = strip(it.findtext("title") or it.findtext(f"{ATOM}title"))
+                if source.endswith("release") and re.search(r"nightly|unstable", title, re.I):
+                    continue  # nightly builds aren't news
                 key = re.sub(r"\W+", "", title.lower())[:60]
                 if not title or key in seen:
                     continue
@@ -107,6 +130,44 @@ def fetch_news() -> tuple[dict, list]:
     return news, failed
 
 
+INDICES = {".SPX": "S&P 500", ".IXIC": "Nasdaq", ".DJI": "Dow Jones", ".VIX": "VIX (volatility)", "J203": "JSE All Share", "ZAR=": "USD/ZAR"}
+# Big and crypto-linked US stocks: any that move 4%+ are flagged as big movers.
+WATCHLIST = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "AMD", "NFLX", "ORCL", "CRM", "ADBE", "INTC", "PLTR",
+             "JPM", "BAC", "GS", "V", "MA", "BRK.B", "UNH", "LLY", "JNJ", "XOM", "CVX", "WMT", "COST", "DIS", "BA", "NKE", "UBER",
+             "COIN", "MSTR", "HOOD", "MARA", "RIOT", "CRCL", "SQ", "PYPL", "IBIT", "ETHA"]
+
+
+def cnbc_quotes(symbols: list[str]) -> list[dict]:
+    out = []
+    for i in range(0, len(symbols), 25):
+        u = ("https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol?symbols="
+             + urllib.request.quote("|".join(symbols[i:i + 25])) + "&requestMethod=itv&noform=1&partnerId=2&fund=1&exthrs=1&output=json")
+        try:
+            out += json.loads(get(u))["FormattedQuoteResult"]["FormattedQuote"]
+        except Exception:  # noqa: BLE001
+            pass
+    return [q for q in out if q.get("last")]
+
+
+def market_data() -> str:
+    """Closing figures from CNBC's quote service, as plain text for the prompt."""
+    lines = []
+    for q in cnbc_quotes(list(INDICES)):
+        lines.append(f"{INDICES.get(q['symbol'], q['symbol'])}: {q['last']} ({q.get('change_pct')}) as of {str(q.get('last_time'))[:10]}")
+    movers = []
+    for q in cnbc_quotes(WATCHLIST):
+        try:
+            pct = float(str(q.get("change_pct", "0")).replace("%", "").replace("+", ""))
+        except ValueError:
+            continue
+        if abs(pct) >= 4:
+            movers.append((pct, f"{q.get('name') or q['symbol']} ({q['symbol']}) {q['last']} {q.get('change_pct')}"))
+    movers.sort(key=lambda m: -abs(m[0]))
+    lines.append("US stocks that moved 4%+ (from a watchlist of big and crypto-linked names): "
+                 + ("; ".join(m[1] for m in movers[:10]) if movers else "none"))
+    return "\n".join(lines) if lines else "not available"
+
+
 def crypto_prices() -> dict:
     try:
         return json.loads(get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=usd,zar&include_24hr_change=true"))
@@ -116,18 +177,29 @@ def crypto_prices() -> dict:
 
 PROMPT = """You are the editor of Gareth's private morning briefing. Gareth is a blockchain security engineer in South Africa
 (works for Sigma Prime, an Ethereum security firm). It's {today}, about 06:30 in South Africa. Write today's briefing from the
-headlines below (published in the last day), plus web searches ONLY for the market figures.
+headlines below (published in the last day) and the market figures provided. You may use web_search to check details of a
+major story or to find big JSE share movers; keep searches few.
 
 Sections, in this order:
 1. **Crypto & Ethereum**: the major crypto news. Prioritise Ethereum (upgrades, EIPs, client releases, the Foundation),
    other protocol news (L2s, Solana, Bitcoin, major DeFi), hacks/exploits and security incidents (always include these, with
    the amount lost and how, if known), regulation, and big market moves. 4 to 8 items.
+   Then a short **Ethereum dev & client releases** sub-heading from the [ethereum] items: notable Ethereum Magicians
+   discussions (new EIPs, hard-fork planning, security topics; skip routine chatter), Foundation blog posts, and client
+   releases. For releases, list stable versions and say if one is a security fix or needed for a fork; mention release
+   candidates only if they're for an upcoming fork. Always include any Lighthouse release (Sigma Prime's client).
+   If nothing notable, one line saying so.
 2. **World politics**: mostly US (White House, Congress, courts, policy that moves markets), then anything major elsewhere
-   (wars, elections, big decisions by other governments; South Africa if it matters). 4 to 7 items.
-3. **Markets** (short, at the bottom). Use web_search to find yesterday's US closing figures: S&P 500, Nasdaq and Dow with
-   % change, plus any individual US stocks that moved sharply (over ~5%) and why. Then the JSE All Share (J203) close and %
-   change, and any big JSE movers. Then the rand vs the US dollar. Then this crypto price table (24h change):
-   {prices}
+   (wars, elections, big decisions by other governments). 4 to 7 items. Then a **South Africa** sub-heading with 1 to 3
+   items from News24 and Daily Maverick: government, the GNU, load-shedding/energy, the economy, anything that affects
+   daily life or the rand.
+3. **Markets** (short, at the bottom). Use these verified figures (from CNBC; say which day's close they are):
+   {markets}
+   - US: S&P 500, Nasdaq and Dow with % change; then the big movers listed, each with a few words on why (from the headlines
+     or a quick search). If none moved 4%+, say it was a quiet day for big names.
+   - JSE: All Share close and % change; mention notable JSE company news or movers from the Moneyweb/BusinessTech headlines.
+   - The rand vs the US dollar.
+   - Crypto prices (24h change): {prices}
 
 Rules:
 - Only include things that genuinely matter. Merge duplicate stories. If a section is quiet, say so in one line.
@@ -135,7 +207,11 @@ Rules:
 - Don't invent facts or figures. If you couldn't find a market figure, say "not available".
 - Output ONLY an HTML fragment (no <html> or <body>), starting with <div and ending with </div>. Use simple inline styles:
   font-family Arial, 15px, line-height 1.5, max-width 680px; <h2> section headings with a thin bottom border; <ul><li> items;
-  links in #0f6b4f. Start with a one-line "Top of the morning" sentence: the single biggest story overall.
+  links in #0f6b4f.
+- Start with a "Top of the morning" box: <div style="background:#eef7f2;border-left:4px solid #0f6b4f;padding:12px 16px;
+  border-radius:6px;margin-bottom:18px"> containing a bold heading "Top of the morning" and 2 to 3 sentences on the single
+  biggest story from any section: what happened, and why it matters to someone in crypto security in South Africa.
+  Don't repeat that story in full again below; a one-line mention with the link is enough.
 
 HEADLINES:
 {headlines}
@@ -216,13 +292,15 @@ def main() -> int:
     now = datetime.now(SAST)
     news, failed = fetch_news()
     prices = crypto_prices()
+    markets = market_data()
+    print("Markets:", markets.replace("\n", " | "))
     counts = {k: len(v) for k, v in news.items()}
     print(f"Headlines: {counts}; failed feeds: {failed or 'none'}")
     headlines = "\n".join(f"[{sec}] {i['source']} | {i['time']} | {i['title']} | {i['summary']} | {i['link']}"
                           for sec, items in news.items() for i in items)
     price_text = "; ".join(f"{k}: ${v['usd']:,.2f} ({v['usd_24h_change']:+.1f}% 24h), R{v['zar']:,.0f}" for k, v in prices.items()) or "not available"
     try:
-        body = call_claude(PROMPT.format(today=now.strftime("%A %d %B %Y"), prices=price_text, headlines=headlines))
+        body = call_claude(PROMPT.format(today=now.strftime("%A %d %B %Y"), prices=price_text, markets=markets, headlines=headlines))
     except Exception as e:  # noqa: BLE001
         print(f"Claude failed: {e}", file=sys.stderr)
         body = fallback(news, prices, str(e))
