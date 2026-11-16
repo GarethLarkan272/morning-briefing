@@ -142,10 +142,30 @@ HEADLINES:
 """
 
 
+def pick_model(key: str) -> str:
+    """The newest Sonnet your key can use (asks the API, so a retired model name never breaks the briefing)."""
+    if os.environ.get("CLAUDE_MODEL"):
+        return os.environ["CLAUDE_MODEL"]
+    req = urllib.request.Request("https://api.anthropic.com/v1/models?limit=100",
+                                 headers={"x-api-key": key, "anthropic-version": "2023-06-01"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        models = json.loads(r.read()).get("data", [])
+    models.sort(key=lambda m: m.get("created_at", ""), reverse=True)
+    for family in ("sonnet", "opus", "haiku"):
+        for m in models:
+            if family in m["id"]:
+                return m["id"]
+    if not models:
+        raise RuntimeError("no Claude models available for this API key")
+    return models[0]["id"]
+
+
 def call_claude(prompt: str) -> str:
     key = os.environ["ANTHROPIC_API_KEY"]
+    model = pick_model(key)
+    print(f"Using model: {model}")
     body = {
-        "model": os.environ.get("CLAUDE_MODEL") or "claude-sonnet-4-5",
+        "model": model,
         "max_tokens": 6000,
         "messages": [{"role": "user", "content": prompt}],
         "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 6}],
