@@ -126,7 +126,11 @@ def fetch_news() -> tuple[dict, list]:
                     link = a.get("href", "") if a is not None else ""
                 summary = strip(it.findtext("description") or it.findtext(f"{ATOM}summary") or it.findtext(f"{ATOM}content") or "")[:280]
                 news[section].append({"source": source, "title": title, "summary": summary, "link": link.strip(),
-                                      "time": d.astimezone(SAST).strftime("%a %H:%M")})
+                                      "time": d.astimezone(SAST).strftime("%a %H:%M"), "_ts": d.timestamp()})
+    for k in news:  # newest first, at most 50 per section
+        news[k] = sorted(news[k], key=lambda i: i["_ts"], reverse=True)[:50]
+        for i in news[k]:
+            i.pop("_ts", None)
     return news, failed
 
 
@@ -242,11 +246,11 @@ def call_claude(prompt: str) -> str:
     print(f"Using model: {model}")
     body = {
         "model": model,
-        "max_tokens": 6000,
+        "max_tokens": 16000,
         "messages": [{"role": "user", "content": prompt}],
         "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 6}],
     }
-    texts = []
+    texts, stop = [], None
     for _ in range(4):  # long searches can pause; continue the same turn
         req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=json.dumps(body).encode(),
                                      headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
@@ -256,12 +260,23 @@ def call_claude(prompt: str) -> str:
         except urllib.error.HTTPError as e:
             raise RuntimeError(f"Claude API {e.code}: {e.read().decode()[:500]}") from e
         texts += [b.get("text", "") for b in resp.get("content", []) if b.get("type") == "text"]
-        if resp.get("stop_reason") != "pause_turn":
+        stop = resp.get("stop_reason")
+        print(f"Claude: stop_reason={stop}, output tokens={resp.get('usage', {}).get('output_tokens')}")
+        if stop != "pause_turn":
             break
         body["messages"] = body["messages"][:1] + [{"role": "assistant", "content": resp["content"]}]
     out = "".join(texts)
-    start, end = out.find("<div"), out.rfind("</div>")
-    return out[start:end + 6] if start >= 0 and end > start else f"<div>{out}</div>"
+    start = out.find("<div")
+    if start < 0:
+        return f"<div>{out}</div>"
+    body = out[start:]
+    end = body.rfind(">")
+    body = body[:end + 1] if end >= 0 else body  # drop any chatter after the HTML
+    if stop == "max_tokens":
+        body += '<p style="color:#a33">(The briefing was cut short today.)</p>'
+    # Close anything left open so the email always shows everything Claude wrote.
+    opened = len(re.findall(r"<div\b", body)) - len(re.findall(r"</div>", body))
+    return body + "</div>" * max(0, opened)
 
 
 def fallback(news: dict, prices: dict, error: str) -> str:
