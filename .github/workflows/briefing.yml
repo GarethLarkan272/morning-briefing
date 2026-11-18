@@ -2,25 +2,65 @@ name: Morning briefing
 
 on:
   schedule:
-    # 04:30 UTC = 06:30 in South Africa. GitHub can start a few minutes late, so it lands before 07:00.
-    - cron: "30 4 * * *"
-  workflow_dispatch: {}  # "Run workflow" button for a test send
+    # South Africa = UTC+2, whatever time zone you're in. GitHub sometimes starts scheduled runs late or skips
+    # them, so there are backups: about 06:50, 07:10 and 07:40 SA time. The first one sends; the others stop.
+    - cron: "50 4 * * *"
+    - cron: "10 5 * * *"
+    - cron: "40 5 * * *"
+  workflow_dispatch: {}  # "Run workflow" button: always sends (for tests)
 
 permissions:
   contents: read
+  actions: write  # to remember "sent today" between runs
+
+concurrency:
+  group: morning-briefing
+  cancel-in-progress: false
 
 jobs:
   send:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Today's date (South Africa)
+        id: day
+        run: echo "date=$(TZ=Africa/Johannesburg date +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Already sent today?
+        id: sent
+        if: github.event_name == 'schedule'
+        uses: actions/cache/restore@v4
+        with:
+          path: .sent
+          key: briefing-sent-${{ steps.day.outputs.date }}
+          lookup-only: true
+
       - uses: actions/checkout@v4
+        if: steps.sent.outputs.cache-hit != 'true'
+
       - uses: actions/setup-python@v5
+        if: steps.sent.outputs.cache-hit != 'true'
         with:
           python-version: "3.12"
+
       - name: Write and send the briefing
+        if: steps.sent.outputs.cache-hit != 'true'
         run: python briefing.py
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+
+      - name: Remember it's been sent today
+        if: steps.sent.outputs.cache-hit != 'true' && github.event_name == 'schedule'
+        run: mkdir -p .sent && date > .sent/at
+
+      - uses: actions/cache/save@v4
+        if: steps.sent.outputs.cache-hit != 'true' && github.event_name == 'schedule'
+        with:
+          path: .sent
+          key: briefing-sent-${{ steps.day.outputs.date }}
+
+      - name: Skipped
+        if: steps.sent.outputs.cache-hit == 'true'
+        run: echo "Today's briefing was already sent by an earlier run."
